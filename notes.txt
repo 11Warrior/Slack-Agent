@@ -1,1 +1,5 @@
 NEW MEMBERS => SLACK SERVICE  (EVENT HANDLER) => MEMBER REACH SERVICE => OPEN AI (LANGCHAIN) => ANALYSIS REPORT GENERATOR => (-> POSTGRESSQL, PRIVATE BOT)
+
+
+Basic of any Ai agent : 
+    Data selection => data cleaning + refining => preparing promt => piping data => result => cleaning result

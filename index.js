@@ -98,24 +98,137 @@ class SlackBot {
             const aiAnalysis = await this.AIAnalysis(userInfo, researchedResult);
 
             analysisId = await this.saveToDb(aiAnalysis, userInfo);
-            
 
-            return aiAnalysis;
+            if (analysisId) {
+                
+            }
+            // return aiAnalysis;
+
         } catch (error) {
             log.error('Error analyzing and posting data', error.message);
             throw error;
         }
+    }
 
+    async saveToDb(aiAnalysis, userInfo) {
+        try {
+
+            
+        } catch (error) {
+
+        }
     }
 
     async AIAnalysis(userInfo, researchedData) {
+        const prompt = new ChatPromptTemplate(
+            `Analyze this new community member for fit with our commercial product.
+
+            Company: ${process.env.COMPANY_NAME || 'Your Company'}
+            Product: ${process.env.COMPANY_PRODUCT || 'Your Product'}
+
+            Member:
+            - Name: {name}
+            - Email: {email}
+            - Title: {title}
+
+            Research Data:
+            {research}
+
+            Provide a JSON response with:
+            - fitScore (0-100): likelihood they'd be interested in our product
+            - insights: array of 3-5 key observations
+            - recommendations: array of 2-4 engagement suggestions
+
+            Consider job title, company size, technical background, and budget 
+            authority.`
+        );
+
+        //research summary = title : content
+        const researchSummary = researchedData.length > 0 ? researchedData.map(r => (`${r.tittle} : ${r.content}`)).join('\\n') : 'Limited Reasearch data provided';
+
+        const chain = prompt.pipe(this.AIModel);
+
+        const response = chain.invoke({
+            name: userInfo.name,
+            email: userInfo.email,
+            title: userInfo.title,
+            research: researchSummary
+        });
+
+        const cleanedResponse = response.replace(/```json\n?|\n?```/g, '').trim()
+
+        return JSON.parse(cleanedResponse);
 
     }
 
     async doResearch(userinfo) {
         //extract company info, github data of the user
+        const researchData = [];
+        const email = userinfo.email;
 
+        const domain = email.split('@')[1];
 
+        const companyInfo = await this.getCompanyInfo(domain, userinfo);
+        const githubInfo = await this.getGithubInfo(userinfo.name);
+
+        if (companyInfo) {
+            researchData.push(companyInfo);
+        }
+
+        if (githubInfo) {
+            researchData.push(githubInfo);
+        }
+
+        if (researchData.length > 0) {
+            return researchData
+        }
+
+        return null;
+    }
+
+    async getCompanyInfo(domain, userInfo) {
+        try {
+            const res = await axios.get(`https://www.${domain}`, {
+                timeout: 5000,
+                headers: 'User-Agent : Mozilla/5.0'
+            });
+
+            const titleMatch = res.data.match(/<title>(.*?)<\/title>/i);
+            const title = titleMatch ? titleMatch[1] : `Company : ${domain}`
+
+            return {
+                'url': `https://www.${domain}`,
+                'content': `Company website for ${domain}`,
+                'title': title,
+                'type': 'company'
+            }
+
+        } catch (error) {
+            log.error('Error getting company Information', error.message);
+            return null;
+        }
+    }
+
+    async getGithubInfo(name) {
+        try {
+            const res = await axios.get(`https://api.github.com/search/users/?q=${encodeURIComponent(name)}`);
+            const githubUsers = res.data.items;
+
+            if (githubUsers.length > 0) {
+                const userGithubProfile = githubUsers[0];
+                return {
+                    'url': userGithubProfile.html_url,
+                    'content': `Github Repos : ${userGithubProfile.public_repos}`,
+                    'title': userGithubProfile.login,
+                    'type': `Github : ${userGithubProfile.login}`
+                }
+            } else {
+                return null;
+            }
+        } catch (error) {
+            log.error('Error getting Github Information', error.message);
+            return null;
+        }
     }
 
     async getUserInfo(userId) {
@@ -139,6 +252,7 @@ class SlackBot {
     async connectDB() {
         //connects to rendr postgres db
         // await 
+
 
 
     }
