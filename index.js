@@ -7,14 +7,10 @@ import axios from "axios";
 import { express } from express;
 import { config } from "dotenv";
 
-config();
+import { log } from "./utils";
+import { markAsSentToSlack } from "./db";
 
-//logging
-const log = {
-    info: (message, ...args) => (console.log(`[INFO]  ${message}`, ...args)),
-    error: (message, ...args) => (console.log(`[ERR]  ${message}`, ...args)),
-    debug: (message, ...args) => (process.env.NODE_ENV === 'development' && console.log(`[DEBUG]  ${message}`, ...args))
-}
+config();
 
 //slack bot init
 class SlackBot {
@@ -98,30 +94,74 @@ class SlackBot {
             const aiAnalysis = await this.AIAnalysis(userInfo, researchedResult);
 
             analysisId = await this.saveToDb(aiAnalysis, userInfo);
+            await this.PostToChannel(userInfo, aiAnalysis);
 
             if (analysisId) {
-                
+                await markAsSentToSlack(userInfo, aiAnalysis);
             }
             // return aiAnalysis;
-
         } catch (error) {
             log.error('Error analyzing and posting data', error.message);
             throw error;
         }
     }
 
-    async saveToDb(aiAnalysis, userInfo) {
-        try {
+    async PostToChannel(userInfo, analysis) {
+        const color = analysis.fitScore >= 80 ? '#8ed76e' : analysis.fitScore > 60 ? '#e69138' : '#cc3434';
 
-            
-        } catch (error) {
+        const blocks = [
+            {
+                type: header,
+                text: { type: 'plain_text', text: `New User added ${userInfo.name}` }
+            },
+            {
+                type: section,
+                fields: [
+                    { type: 'mrkdwn', text: `Fitscore : ${analysis.fitScore / 100}` },
+                    { type: 'mrkdwn', text: `Email : ${userInfo.email}` },
+                    { type: 'mrkdwn', text: `Title : ${analysis.title}` }
+                ]
+            }
+        ];
 
+        if (analysis.insights) {
+            blocks.push({
+                type: section,
+                fields: [{ type: 'mrkdwn', text: `Insights : ${analysis.insights}` || 'Failed to extract insights' }]
+            });
         }
+
+        if (analysis.recommendations) {
+            blocks.push({
+                type: section,
+                fields: [{ type: 'mrkdwn', text: `Recommendations : ${analysis.recommendations}` || 'Failed to extract recommendations' }]
+            });
+        }
+
+        blocks.push({
+            type: context,
+            elements: [{
+                type: 'mrkdwn', text: `Analyzed : ${new Date().toISOString()}`
+            }]
+        });
+
+        await this.WebClient.chat.postMessage({
+            channel: process.env.SLACK_CHANNEL_ID,
+            text: `New User Analysis ${userInfo.name} : ${analysis.fitScore / 100}`,
+            attachments: {
+                color,
+                blocks
+            }
+
+        })
+        
+        log.info(`Analysis posted to channel for ${userInfo.name}`)
     }
 
     async AIAnalysis(userInfo, researchedData) {
-        const prompt = new ChatPromptTemplate(
-            `Analyze this new community member for fit with our commercial product.
+        try {
+            const prompt = new ChatPromptTemplate(
+                `Analyze this new community member for fit with our commercial product.
 
             Company: ${process.env.COMPANY_NAME || 'Your Company'}
             Product: ${process.env.COMPANY_PRODUCT || 'Your Product'}
@@ -141,24 +181,37 @@ class SlackBot {
 
             Consider job title, company size, technical background, and budget 
             authority.`
-        );
+            );
 
-        //research summary = title : content
-        const researchSummary = researchedData.length > 0 ? researchedData.map(r => (`${r.tittle} : ${r.content}`)).join('\\n') : 'Limited Reasearch data provided';
+            //research summary = title : content
+            const researchSummary = researchedData.length > 0 ? researchedData.map(r => (`${r.tittle} : ${r.content}`)).join('\\n') : 'Limited Reasearch data provided';
 
-        const chain = prompt.pipe(this.AIModel);
+            const chain = prompt.pipe(this.AIModel);
 
-        const response = chain.invoke({
-            name: userInfo.name,
-            email: userInfo.email,
-            title: userInfo.title,
-            research: researchSummary
-        });
+            const response = chain.invoke({
+                name: userInfo.name,
+                email: userInfo.email,
+                title: userInfo.title,
+                research: researchSummary
+            });
 
-        const cleanedResponse = response.replace(/```json\n?|\n?```/g, '').trim()
+            const cleanedResponse = response.replace(/```json\n?|\n?```/g, '').trim()
 
-        return JSON.parse(cleanedResponse);
+            const analysis = JSON.parse(cleanedResponse);
 
+            return {
+                fitScore: Math.max(0, Math.min(100, analysis.fitScore || 50)),
+                insights: Array.isArray(analysis.insights) ? analysis.insights : ['Analysis Completed'],
+                recommendations: Array.isArray(analysis.recommendations) ? analysis.recommendations : ['Follow Up Recommended']
+            }
+        } catch (error) {
+            log.error('Error while doing AI Analysis', error.message);
+            return {
+                fitScore: 50,
+                insights: ['Failed to get the insights'],
+                recommendations: ['Failed to get the recommendations']
+            }
+        }
     }
 
     async doResearch(userinfo) {
@@ -247,13 +300,5 @@ class SlackBot {
             title: user.profile.title,
             timezone: user.tz
         }
-    }
-
-    async connectDB() {
-        //connects to rendr postgres db
-        // await 
-
-
-
     }
 }
