@@ -16,7 +16,7 @@ config();
 class SlackBot {
     constructor() {
         this.app = express();
-        this.PORT = process.env.PORT;
+        this.PORT = process.env.PORT || 3000;
         this.slack_app = new App({
             token: process.env.TOKEN,
             appToken: process.env.APP_TOKEN,
@@ -97,7 +97,7 @@ class SlackBot {
             await this.PostToChannel(userInfo, aiAnalysis);
 
             if (analysisId) {
-                await markAsSentToSlack(userInfo, aiAnalysis);
+                await markAsSentToSlack(analysisId);
             }
             // return aiAnalysis;
         } catch (error) {
@@ -152,9 +152,8 @@ class SlackBot {
                 color,
                 blocks
             }
-
         })
-        
+
         log.info(`Analysis posted to channel for ${userInfo.name}`)
     }
 
@@ -301,4 +300,59 @@ class SlackBot {
             timezone: user.tz
         }
     }
+
+    async start() {
+        try {
+            log.info('Starting the agent');
+            await initDb();
+
+            const port = this.PORT;
+
+            this.app.listen(port, (req, res) => (
+                log.info('Started server on port ', port)
+            ))
+
+            if (this.NODE_ENV === 'development') {
+                log.info(`In test environment the endpoint is localhost:${port}/test/analysis-and-post`);
+            }
+
+            this.slack_app.start();
+
+            log.info('Starting slack app');
+
+        } catch (error) {
+            log.error('Error starting the agent', error.message);
+            process.exit(1);
+        }
+    }
+
+    async stop() {
+        try {
+            await closeDB();
+
+            if (this.server) {
+                await new Promise(resolve => this.server.close(resolve));
+            }
+
+            await this.slack_app.stop();
+            log.info('Stopping agent..');
+
+        } catch (error) {
+            log.error('Error starting the agent');
+            throw error;
+        }
+        process.exit(0);
+    }
 }
+
+const agent = new SlackBot();
+
+process.on('SIGINT', () => agent.stop());
+process.on('SIGTERM', () => agent.stop());
+
+agent.start().catch(e => {
+    log.error('Error starting agent', e.message)
+    process.exit(1);
+});
+
+export default agent;

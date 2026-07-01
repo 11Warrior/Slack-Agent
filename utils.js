@@ -3,3 +3,4 @@ export const log = {
     error: (message, ...args) => (console.log(`[ERR]  ${message}`, ...args)),
     debug: (message, ...args) => (process.env.NODE_ENV === 'development' && console.log(`[DEBUG]  ${message}`, ...args))
 }
+
