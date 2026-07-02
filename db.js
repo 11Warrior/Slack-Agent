@@ -1,5 +1,7 @@
 import { Pool } from "pg";
-import { log } from "./utils";
+import { log } from "./utils.js";
+import "dotenv/config"
+
 
 const dbPool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -16,16 +18,16 @@ dbPool.on('connect', () => (
 ))
 
 dbPool.on('error', (error) => (
-    log.error('Error connecting to db', error.message)
+    console.error('Error connecting to db', error.message)
 ))
 
 export async function initDb() {
-    try {
-        const client = await connectDB();
+    const client = await connectDB();
 
+    try {
         await client.query(`
              CREATE TABLE  IF NOT EXISTS user_analysis (
-                id SERIAL PRIMARY_KEY,
+                id SERIAL PRIMARY KEY,
                 user_id VARCHAR(255),
                 name VARCHAR(255) NOT NULL,
                 email VARCHAR(255),
@@ -40,25 +42,27 @@ export async function initDb() {
                 posted_to_slack BOOLEAN DEFAULT FALSE,
                 sent_to_slack_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
              )`
         )
 
+        await client.query(`CREATE INDEX IF NOT EXISTS user_id_idx ON user_analysis(user_id)`);
 
-        await client.query(`CREATE INDEX user_id_idx ON user_analysis(user_id)`);
-
-        await client.query(`CREATE INDEX analysis_id_idx ON user_analysis(analysis_id)`); 4
+        await client.query(`CREATE INDEX IF NOT EXISTS  analysis_id_idx ON user_analysis(analysis_id)`); 
 
         log.info('Creating DB');
 
     } catch (error) {
         log.error('Failed to initialize the db', error.message);
+    } finally {
+        client.release();
     }
 }
 
 export async function saveToDb(aiAnalysis, userInfo, researchData) {
+    const client = await connectDB();
+
     try {
-        const client = await connectDB();
         const res = await client.query(`
             INSERT INTO user_analysis (
                 user_id,
@@ -98,9 +102,9 @@ export async function saveToDb(aiAnalysis, userInfo, researchData) {
 }
 
 export async function markAsSentToSlack(analysisId) {
+    const client = await connectDB();
+    
     try {
-        const client = await connectDB();
-
         await client.query(`
             UPDATE user_analysis 
             SET posted_to_slack = TRUE,
@@ -122,8 +126,10 @@ export async function connectDB() {
     //connects to rendr postgres db
     try {
         log.info('Connecting to the db');
+
         const client = await dbPool.connect();
         return client;
+        
     } catch (error) {
         log.error('Error connecting to the db', error.message);
         throw error;

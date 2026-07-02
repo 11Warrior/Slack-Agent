@@ -1,35 +1,35 @@
 // Slack API setup
 import { App } from "@slack/bolt";
 import { WebClient } from "@slack/web-api";
-import { ChatOpenAI } from "@langchain/openai";
 import { ChatPromptTemplate } from "@langchain/core/prompts";
 import axios from "axios";
-import { express } from express;
+import express from "express";
 import { config } from "dotenv";
-
-import { log } from "./utils";
-import { markAsSentToSlack } from "./db";
+import { log } from "./utils.js";
+import { initDb, markAsSentToSlack, saveToDb } from "./db.js";
+import { ChatGroq } from "@langchain/groq";
 
 config();
 
 //slack bot init
 class SlackBot {
+
     constructor() {
         this.app = express();
         this.PORT = process.env.PORT || 3000;
         this.slack_app = new App({
-            token: process.env.TOKEN,
-            appToken: process.env.APP_TOKEN,
+            token: process.env.SLACK_BOT_TOKEN,
+            appToken: process.env.SLACK_APP_TOKEN,
             signingSecret: process.env.SIGNING_SECRET,
             socketMode: true,
         })
 
         this.WebClient = new WebClient(process.env.SLACK_BOT_TOKEN);
 
-        this.AIModel = new ChatOpenAI({
-            model: 'gpt-4',
+        this.AIModel = new ChatGroq({
+            model: "llama-3.1-8b-instant",
             temperature: 0.3,
-            apiKey: process.env.OPENAI_API_KEY
+            apiKey: process.env.GROK_API_KEY
         })
 
         this.SetUpSlackEvents();
@@ -64,25 +64,31 @@ class SlackBot {
     }
 
     SetUpExpress() {
+        this.app.use(express.json());
+
         this.app.get('/health', (req, res) => {
             res.json({ status: 'healthy', timestamp: new Date().toISOString() });
         })
 
-            // this.app.listen(this.PORT, () => {
-            //     console.log('Server listening at port', this.PORT);
-            // })
+        if (process.env.NODE_ENV === 'development') {
+            this.app.post('/test/analysis-and-post', async (req, res) => {
+                try {
+                    // console.log(req.body);
+                    const { userinfo } = req.body;
+                    if (!userinfo) res.status(400).json({ message: "User Info is not in the req body" });
 
-            ((process.env.NODE_ENV === 'development') && (
-                this.app.get('/test/analysis-and-post', (req, res) => {
-                    try {
-                        const { userinfo } = req.body;
-                        if (!userinfo) res.status(400).json({ message: "User Info is not in the req body" })
-                        this.AnalyzeAndPost(userinfo);
-                    } catch (error) {
-                        log.error('Failed to analyze and post user while testing', error.message);
-                    }
-                })
-            ))
+                    const analysis = await this.AnalyzeAndPost(userinfo);
+
+                    res.json({
+                        sucess: true,
+                        analysis,
+                        timestamp: new Date().toISOString()
+                    })
+                } catch (error) {
+                    log.error('Failed to analyze and post user while testing', error.message);
+                }
+            })
+        }
     }
 
     async AnalyzeAndPost(userInfo) {
@@ -93,13 +99,13 @@ class SlackBot {
             const researchedResult = await this.doResearch(userInfo);
             const aiAnalysis = await this.AIAnalysis(userInfo, researchedResult);
 
-            analysisId = await this.saveToDb(aiAnalysis, userInfo);
+            analysisId = await saveToDb(aiAnalysis, userInfo);
             await this.PostToChannel(userInfo, aiAnalysis);
 
             if (analysisId) {
                 await markAsSentToSlack(analysisId);
             }
-            // return aiAnalysis;
+            return aiAnalysis;
         } catch (error) {
             log.error('Error analyzing and posting data', error.message);
             throw error;
@@ -111,47 +117,50 @@ class SlackBot {
 
         const blocks = [
             {
-                type: header,
+                type: 'header',
                 text: { type: 'plain_text', text: `New User added ${userInfo.name}` }
             },
             {
-                type: section,
+                type: 'section',
                 fields: [
                     { type: 'mrkdwn', text: `Fitscore : ${analysis.fitScore / 100}` },
                     { type: 'mrkdwn', text: `Email : ${userInfo.email}` },
-                    { type: 'mrkdwn', text: `Title : ${analysis.title}` }
+                    { type: 'mrkdwn', text: `Title : ${userInfo.title}`  || 'Not Provided'}
                 ]
             }
         ];
 
         if (analysis.insights) {
             blocks.push({
-                type: section,
+                type: 'section',
                 fields: [{ type: 'mrkdwn', text: `Insights : ${analysis.insights}` || 'Failed to extract insights' }]
             });
         }
 
         if (analysis.recommendations) {
             blocks.push({
-                type: section,
+                type: 'section',
                 fields: [{ type: 'mrkdwn', text: `Recommendations : ${analysis.recommendations}` || 'Failed to extract recommendations' }]
             });
         }
 
         blocks.push({
-            type: context,
+            type: 'context',
             elements: [{
                 type: 'mrkdwn', text: `Analyzed : ${new Date().toISOString()}`
             }]
         });
 
+        // console.log(blocks);
+
         await this.WebClient.chat.postMessage({
             channel: process.env.SLACK_CHANNEL_ID,
             text: `New User Analysis ${userInfo.name} : ${analysis.fitScore / 100}`,
-            attachments: {
-                color,
-                blocks
+            attachments: [{
+                color: color,
+                blocks: blocks
             }
+            ]
         })
 
         log.info(`Analysis posted to channel for ${userInfo.name}`)
@@ -159,27 +168,37 @@ class SlackBot {
 
     async AIAnalysis(userInfo, researchedData) {
         try {
-            const prompt = new ChatPromptTemplate(
-                `Analyze this new community member for fit with our commercial product.
 
-            Company: ${process.env.COMPANY_NAME || 'Your Company'}
-            Product: ${process.env.COMPANY_PRODUCT || 'Your Product'}
+            const prompt = ChatPromptTemplate.fromTemplate(
+                `Analyze this new community member for fit with our commercial product. 
+                Return ONLY valid JSON.
 
-            Member:
-            - Name: {name}
-            - Email: {email}
-            - Title: {title}
+                Example:
 
-            Research Data:
-            {research}
+                {{
+                "fitScore": 70,
+                "insights": ["Insight 1"],
+                "recommendations": ["Recommendation 1"]
+                }}
+                
+                Company: ${process.env.COMPANY_NAME || 'Your Company'}
+                Product: ${process.env.COMPANY_PRODUCT || 'Your Product'}
 
-            Provide a JSON response with:
-            - fitScore (0-100): likelihood they'd be interested in our product
-            - insights: array of 3-5 key observations
-            - recommendations: array of 2-4 engagement suggestions
+                Member:
+                - Name: {name}
+                - Email: {email}
+                - Title: {title}
 
-            Consider job title, company size, technical background, and budget 
-            authority.`
+                Research Data:
+                {research}
+
+                Provide a JSON response with:
+                - fitScore (0-100): likelihood they'd be interested in our product
+                - insights: array of 3-5 key observations
+                - recommendations: array of 2-4 engagement suggestions
+
+                Consider job title, company size, technical background, and budget 
+                authority.`
             );
 
             //research summary = title : content
@@ -187,16 +206,24 @@ class SlackBot {
 
             const chain = prompt.pipe(this.AIModel);
 
-            const response = chain.invoke({
+            const response = await chain.invoke({
                 name: userInfo.name,
-                email: userInfo.email,
-                title: userInfo.title,
+                email: userInfo.email || 'Not Provided',
+                title: userInfo.title || 'Not Provided',
                 research: researchSummary
             });
 
-            const cleanedResponse = response.replace(/```json\n?|\n?```/g, '').trim()
+            const responseText = response.content || '';
 
-            const analysis = JSON.parse(cleanedResponse);
+            const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+
+            if (!jsonMatch) {
+                throw new Error(
+                    `Model did not return JSON:\n${responseText}`
+                );
+            }
+
+            const analysis = JSON.parse(jsonMatch[0]);
 
             return {
                 fitScore: Math.max(0, Math.min(100, analysis.fitScore || 50)),
@@ -238,14 +265,14 @@ class SlackBot {
         return null;
     }
 
-    async getCompanyInfo(domain, userInfo) {
+    async getCompanyInfo(domain) {
         try {
-            const res = await axios.get(`https://www.${domain}`, {
+            const result = await axios.get(`https://www.${domain}`, {
                 timeout: 5000,
                 headers: 'User-Agent : Mozilla/5.0'
             });
 
-            const titleMatch = res.data.match(/<title>(.*?)<\/title>/i);
+            const titleMatch = result.data.match(/<title>(.*?)<\/title>/i);
             const title = titleMatch ? titleMatch[1] : `Company : ${domain}`
 
             return {
@@ -256,14 +283,14 @@ class SlackBot {
             }
 
         } catch (error) {
-            log.error('Error getting company Information', error.message);
+            log.info('Failed to get company Information', error.message);
             return null;
         }
     }
 
     async getGithubInfo(name) {
         try {
-            const res = await axios.get(`https://api.github.com/search/users/?q=${encodeURIComponent(name)}`);
+            const res = await axios.get(`https://api.github.com/search/users?q=${encodeURIComponent(name)}`);
             const githubUsers = res.data.items;
 
             if (githubUsers.length > 0) {
@@ -278,14 +305,14 @@ class SlackBot {
                 return null;
             }
         } catch (error) {
-            log.error('Error getting Github Information', error.message);
+            log.info('Failed to get Github Information', error.message);
             return null;
         }
     }
 
     async getUserInfo(userId) {
-        const res = await this.WebClient.users.info({ user: userId });
-        const user = res.user;
+        const result = await this.WebClient.users.info({ user: userId });
+        const user = result.user;
 
         return {
             id: user.id,
